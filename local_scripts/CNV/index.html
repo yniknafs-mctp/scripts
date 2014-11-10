@@ -1,0 +1,384 @@
+{% extends "layout.html" %}
+{% block head %}
+
+<style>
+rect.bordered {
+  stroke: #E6E6E6;
+  stroke-width:2px;   
+}
+
+text.mono {
+  font-size: 9pt;
+  font-family: Consolas, courier;
+  fill: #000;
+}
+
+</style>
+
+<script src="http://ajax.googleapis.com/ajax/libs/jquery/1.10.2/jquery.min.js"></script>
+<script src="http://d3js.org/d3.v3.js"></script>
+
+<script>
+$(document).ready( function() {
+    var form = $('#study_form');
+
+    form.find('#study').change(function(){
+        $.ajax({
+            type: "POST",
+            url: form.attr('action'),
+            data: form.serialize(),
+            success: function(response) {
+                //optionally do something
+            }
+        });
+    });
+});
+</script>
+{% endblock %}
+
+{% block body %}
+<h2>Search</h2>
+<form name='study_form' id='study_form' action="{{ url_for('select_study') }}" method=post>
+  Study:
+  <select name='study', id='study'>
+  {% for name in studies %}
+    <option value="{{ name }}">{{ name }}</option> 
+  {% endfor %}
+  </select>
+  <noscript><input type="submit" value="Submit"></noscript>
+</form>
+<div id='add'>
+  <dl>
+    <dt>Transcript ID:
+    <input id=rowname type=text/>
+    <input id='addRowButton' type=button value='+' onclick="addRow()"/>
+    <input id='clearRowsButton' type=button value='Clear' onclick="clearRows()"/>
+    </dt>
+    <dt>Sample Set ID: 
+    <input id=colname type=text/>
+    <input id='addColButton' type=button value='+' onclick="addColumn()"/>
+    <input id='clearColsButton' type=button value='Clear' onclick="clearCols()"/>
+    </dt>
+    <dt>Value: 
+    <input id=value type=text/>
+    </dt>    
+  </dl>
+</div>
+
+<div id="chart"></div>
+
+<script type="text/javascript">
+
+// CONSTANTS
+
+
+// GLOBALS FOR DATA
+var rows = newOrderedDict();
+var cols = newOrderedDict();
+var data = {};
+
+// OrderedDict paradigm
+function addOrderedDict(obj, v) {
+	var seen = obj.dict.has(v);
+    if ( !seen ) {
+    	obj.dict.set(v, obj.order.length);
+    	obj.order.push(v);
+    }
+    return !seen;
+}
+function clearOrderedDict(obj) {
+	var empty = obj.order.length == 0;
+	if ( !empty ) {
+	    obj.order.length = 0;
+	    delete obj.dict;
+	    obj.dict = d3.map();
+	}
+	return !empty;
+}
+function newOrderedDict() {
+	return({ order: [], dict: d3.map() });
+}
+
+// request to add data
+function requestAddCell(row, col) {
+	var key = row + "," + col;
+	var d = JSON.stringify({ row: row, col: col });
+    // issue json post request
+	d3.json("{{ url_for('request_result') }}")
+        .header("Content-Type", "application/json")
+	    .post(d, function(error, json) {
+            console.log("received: '" + JSON.stringify(json) + "'");
+        	if (error) return console.warn(error);
+        	data[key] = json;
+        	update();
+        });
+    // add dummy data while waiting
+    data[key] = { row: row, col: col, value: NaN };
+}
+
+///////////////////////////////
+// CALLBACKS FROM BUTTONS
+///////////////////////////////
+function addRow() {
+    // value of input field
+    var name = document.getElementById('rowname').value;
+    if ( !name ) {
+    	// TODO: some error/warning message
+    	return;
+    }
+    // update row
+    if ( addOrderedDict(rows, name) ) {
+        // add data value for each new cell
+        for (i=0, len=cols.order.length; i<len; i++) {
+            requestAddCell(name, cols.order[i]);
+        }
+        update();    	
+    }
+}
+function addColumn() {
+    // value of input field
+    var name = document.getElementById('colname').value;
+    if ( !name ) {
+        // TODO: some error/warning message
+        return;
+    }
+    // update column
+    if ( addOrderedDict(cols, name) ) {
+        // add data value for each new cell
+        for (i=0, len=rows.order.length; i<len; i++) {
+            requestAddCell(rows.order[i], name);
+        }
+        update();
+    }
+}
+function clearRows() {
+	if ( clearOrderedDict(rows) ) {
+	    delete data;
+	    data = {};
+		update();
+	}
+}
+function clearCols() {
+	if ( clearOrderedDict(cols) ) {
+	    delete data;
+	    data = {};
+		update();
+	}
+}
+
+//////////////////////////////////////
+// D3
+//////////////////////////////////////
+// initialize heatmap
+var margin = { top: 100, right: 10, bottom: 10, left: 100 }
+var width = 960 - margin.left - margin.right;
+var height = 960 - margin.top - margin.bottom;
+var gridSize = Math.floor(width / 24);
+var legendElementWidth = gridSize*2;
+var defaultcolor = "#888888";
+var colorScale = d3.scale.linear()
+   .domain([-1, 0, 1])
+   .range(["blue", "white", "red"]);
+// var color = d3.scale.linear()
+//    .domain([-1, -0.66, -0.33, 0, 0.33, 0.66, 1])
+//    .range(["yellow", "orange", "red", "white", "green", "blue", "purple"]);
+
+// create SVG
+var svg = d3.select("#chart").append("svg")
+    .attr("width", width)
+    .attr("height", height)
+    .append("g")
+    .attr("transform", "translate(" + margin.left + "," + margin.top + ")");
+
+// make a shape just to ensure it is working
+svg.append("circle")
+    .style("stroke", "gray")
+    .style("fill", "white")
+    .attr("r", 40)
+    .attr("cx", 50)
+    .attr("cy", 50)
+    .on("mouseover", function(){d3.select(this).style("fill", "aliceblue");})
+    .on("mouseout", function(){d3.select(this).style("fill", "white");});
+
+function update() {
+    // ROW LABELS
+    var rowLabels = svg.selectAll(".row")
+        .data(rows.order, function(d) { return d; });
+    // ENTER: Create new elements as needed
+	var rowLabelsEnter = rowLabels.enter().append('text')
+	   .text(function(d) { return d; })
+       .attr("x", 0)
+       .attr("y", function(d, i) { return i * gridSize; })
+       .style("text-anchor", "end")
+       .attr("transform", "translate(-6," + gridSize / 1.5 + ")")
+       .attr("class", "row mono");
+    // EXIT
+    rowLabels.exit().remove();
+    
+    // COLUMN LABELS
+    var colLabels = svg.selectAll(".col")
+        .data(cols.order, function(d) { return d; });
+    // ENTER: Create new elements as needed
+    var colLabelsEnter = colLabels.enter().append("text")
+       .text(function(d) { return d; })
+       .attr("x", function(d, i) { return i * gridSize; })
+       .attr("y", 0)
+       .style("text-anchor", "middle")
+       .attr("transform", "translate(" + gridSize / 2 + ", -6)")
+//       .attr("transform", "rotate(-90)")
+//       .attr("transform", "translate(" + gridSize / 2 + ",-6)" + "rotate(-90)")
+       .attr("class", "col mono");
+    // EXIT
+    colLabels.exit().remove();
+    
+    // DATA
+    var heatmap = svg.selectAll("rect")
+        .data(d3.entries(data), function(d) { return d.key; });
+    // ENTER
+    heatmap.enter().append("rect")
+        .attr("x", function(d) { return cols.dict.get(d.value.col) * gridSize; })
+        .attr("y", function(d) { return rows.dict.get(d.value.row) * gridSize; })
+        .attr("rx", 4)
+        .attr("ry", 4)
+        .attr("width", gridSize)
+        .attr("height", gridSize);
+    // ENTER + UPDATE
+    heatmap.style("fill", function(d) {
+    	var v = d.value.value;
+    	if ( isNaN(v) ) return defaultcolor;
+    	return colorScale(v);
+    });
+    // EXIT
+    heatmap.exit().remove();
+    
+/*
+    // ENTER
+    heatmap.enter().append("rect")
+        .attr("x", function(d) { alert(cols.dict.get(d.ss_id); return cols.dict.get(d.ss_id) * gridSize; })
+        .attr("y", function(d) { return rows.dict.get(d.t_id) * gridSize; })
+        .attr("rx", 4)
+        .attr("ry", 4)
+        .attr("width", gridSize)
+        .attr("height", gridSize)
+        .style("fill", colors[0]);
+*/
+
+    /*
+    var colorScale = d3.scale.quantile()
+        .domain([0, buckets - 1, d3.max(data, function (d) { return d.value; })])
+        .range(colors);
+    */    
+}
+
+// initialize
+update();
+
+
+
+/*
+d3.text("/test")
+  .header("Content-type", "application/x-www-form-urlencoded")
+  .post("a=1&b=2&c=3", function(error, text) { console.log(text); });
+
+d3.json("/get_single_result"	  
+	    "path/to/file.json", function(error, json) {
+   if (error) return console.warn(error);
+   data = json;
+   visualizeit();
+});
+*/
+
+
+//circle.exit().remove();
+
+
+/*
+var margin = { top: 50, right: 0, bottom: 100, left: 30 }, 
+      width = 960 - margin.left - margin.right,
+      height = 430 - margin.top - margin.bottom,
+      gridSize = Math.floor(width / 24),
+      legendElementWidth = gridSize*2,
+      buckets = 9,
+      colors = ["#ffffd9","#edf8b1","#c7e9b4","#7fcdbb","#41b6c4","#1d91c0","#225ea8","#253494","#081d58"], // alternatively colorbrewer.YlGnBu[9]
+      days = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"],
+      times = ["1a", "2a", "3a", "4a", "5a", "6a", "7a", "8a", "9a", "10a", "11a", "12a", "1p", "2p", "3p", "4p", "5p", "6p", "7p", "8p", "9p", "10p", "11p", "12p"];
+
+d3.tsv("data.tsv",
+    function(d) {
+      return {
+        day: +d.day,
+        hour: +d.hour,
+        value: +d.value
+      };
+    },
+    function(error, data) {
+      var colorScale = d3.scale.quantile()
+          .domain([0, buckets - 1, d3.max(data, function (d) { return d.value; })])
+          .range(colors);
+
+      var svg = d3.select("#chart").append("svg")
+          .attr("width", width + margin.left + margin.right)
+          .attr("height", height + margin.top + margin.bottom)
+          .append("g")
+          .attr("transform", "translate(" + margin.left + "," + margin.top + ")");
+
+      var dayLabels = svg.selectAll(".dayLabel")
+          .data(days)
+          .enter().append("text")
+            .text(function (d) { return d; })
+            .attr("x", 0)
+            .attr("y", function (d, i) { return i * gridSize; })
+            .style("text-anchor", "end")
+            .attr("transform", "translate(-6," + gridSize / 1.5 + ")")
+            .attr("class", function (d, i) { return ((i >= 0 && i <= 4) ? "dayLabel mono axis axis-workweek" : "dayLabel mono axis"); });
+
+      var timeLabels = svg.selectAll(".timeLabel")
+          .data(times)
+          .enter().append("text")
+            .text(function(d) { return d; })
+            .attr("x", function(d, i) { return i * gridSize; })
+            .attr("y", 0)
+            .style("text-anchor", "middle")
+            .attr("transform", "translate(" + gridSize / 2 + ", -6)")
+            .attr("class", function(d, i) { return ((i >= 7 && i <= 16) ? "timeLabel mono axis axis-worktime" : "timeLabel mono axis"); });
+
+      var heatMap = svg.selectAll(".hour")
+          .data(data)
+          .enter().append("rect")
+          .attr("x", function(d) { return (d.hour - 1) * gridSize; })
+          .attr("y", function(d) { return (d.day - 1) * gridSize; })
+          .attr("rx", 4)
+          .attr("ry", 4)
+          .attr("class", "hour bordered")
+          .attr("width", gridSize)
+          .attr("height", gridSize)
+          .style("fill", colors[0]);
+
+      heatMap.transition().duration(1000)
+          .style("fill", function(d) { return colorScale(d.value); });
+
+      heatMap.append("title").text(function(d) { return d.value; });
+          
+      var legend = svg.selectAll(".legend")
+          .data([0].concat(colorScale.quantiles()), function(d) { return d; })
+          .enter().append("g")
+          .attr("class", "legend");
+
+      legend.append("rect")
+        .attr("x", function(d, i) { return legendElementWidth * i; })
+        .attr("y", height)
+        .attr("width", legendElementWidth)
+        .attr("height", gridSize / 2)
+        .style("fill", function(d, i) { return colors[i]; });
+
+      legend.append("text")
+        .attr("class", "mono")
+        .text(function(d) { return "≥ " + Math.round(d); })
+        .attr("x", function(d, i) { return legendElementWidth * i; })
+        .attr("y", height + gridSize);
+  });
+*/
+
+</script>  
+  
+{% endblock %}
